@@ -6,9 +6,72 @@ import { PineconeStore } from '@langchain/pinecone';
 import { OpenAIEmbeddings } from '@langchain/openai';
 import { ChatOpenAI } from '@langchain/openai';
 import { Pinecone, Index as PineconeIndex } from '@pinecone-database/pinecone';
+import { Document } from 'langchain/document';
+import { Logger } from '@nestjs/common';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ChatResponseDto } from './dto/chat-response.dto';
+import { promises as fs } from 'fs';
+import { join } from 'path';
+import * as Papa from 'papaparse';
+// Local result types used by the service
+export type EventMetadata = {
+  event_api_id: string;
+  event_name: string;
+  event_url: string;
+  start_at: string;
+  end_at: string;
+  timezone: string;
+  location_type: string;
+  event_type: string;
+  visibility: string;
+  guest_count: string;
+  ticket_count: string;
+  is_free: string;
+  require_approval: string;
+  calendar_name: string;
+  calendar_api_id: string;
+  city: string;
+  region: string;
+  country: string;
+  full_address: string;
+  latitude: string;
+  longitude: string;
+  cover_url: string;
+  hosts: string;
+  host_ids: string;
+};
+
+export type GuestMetadata = {
+  event_api_id: string;
+  event_name: string;
+  guest_api_id: string;
+  guest_name: string;
+  username: string;
+  website: string;
+  timezone: string;
+  bio_short: string;
+  avatar_url: string;
+  twitter_handle: string;
+  linkedin_handle: string;
+  instagram_handle: string;
+  youtube_handle: string;
+  tiktok_handle: string;
+  last_online_at: string;
+  num_tickets_registered: string;
+  section_label: string;
+};
+
+export type IngestResult = {
+  processedDocs: number;
+  chunks: number;
+  success: boolean;
+  message: string;
+};
+
+export type QueryResult = {
+  answer: string;
+  sources: Array<{ content: string; metadata: Record<string, any> }>;
+};
 
 @Injectable()
 export class RAGServiceWithLangChain {
@@ -17,7 +80,19 @@ export class RAGServiceWithLangChain {
   private conversations: Map<string, ConversationalRetrievalQAChain>;
   private embeddings: OpenAIEmbeddings;
   private pineconeIndex: PineconeIndex;
+  private pineconeClient: Pinecone;
+  private readonly logger = new Logger(RAGServiceWithLangChain.name);
   private initialized = false;
+  private readonly projectRoot = process.cwd();
+
+  private resolvePath(filePath: string): string {
+    // If it's already an absolute path starting with /, return as is
+    if (filePath.startsWith('/')) {
+      return filePath;
+    }
+    // Otherwise join with project root
+    return join(this.projectRoot, filePath);
+  }
 
   constructor(private readonly configService: ConfigService) {
     this.conversations = new Map();
@@ -50,15 +125,13 @@ export class RAGServiceWithLangChain {
 
     const config = {
       apiKey: pineconeApiKey,
-      // ...(pineconeHost ? { host: pineconeHost } : {}),
-      // ...(pineconeEnv ? { environment: pineconeEnv } : {}),
     };
 
-    const pinecone = new Pinecone(config);
+    this.pineconeClient = new Pinecone(config);
     const indexName = this.configService.getOrThrow<string>(
       'app.pinecone.indexName',
     );
-    this.pineconeIndex = pinecone.Index(indexName);
+    this.pineconeIndex = this.pineconeClient.Index(indexName);
 
     // Initialize vector store
     try {
@@ -73,104 +146,379 @@ export class RAGServiceWithLangChain {
     }
   }
 
-  // Step 1: Ingest data using LangChain loaders
-  async ingestCSV(filePath: string) {
+  // Ingest two CSVs (events + guests) and store into Pinecone
+  async ingestBothCSVs(
+    eventsFilePath: string,
+    guestsFilePath: string,
+  ): Promise<IngestResult> {
     await this.initialize();
 
     try {
-      // Load CSV
-      const loader = new CSVLoader(filePath);
-      const docs = await loader.load();
+      this.logger.log('Starting dual CSV ingestion...');
+
+      const allDocs: Document[] = [];
+
+      // Resolve paths relative to project root
+      const resolvedEventsPath = this.resolvePath(eventsFilePath);
+      const resolvedGuestsPath = this.resolvePath(guestsFilePath);
+
+      this.logger.log(`Resolved paths:
+        Events: ${resolvedEventsPath}
+        Guests: ${resolvedGuestsPath}
+      `);
+
+      // ============= EVENTS =============
+      // Check if files exist
+      try {
+        await fs.access(resolvedEventsPath);
+        await fs.access(resolvedGuestsPath);
+      } catch (error) {
+        throw new Error(
+          `File access error: ${(error as Error).message}. Make sure the files exist in the data directory.`,
+        );
+      }
+
+      this.logger.log(`Loading events from: ${resolvedEventsPath}`);
+      let eventDocs: Document[] = [];
+      try {
+        const eventsFileContent = await fs.readFile(
+          resolvedEventsPath,
+          'utf-8',
+        );
+        const parsedEvents = Papa.parse<EventMetadata>(eventsFileContent, {
+          header: true,
+          skipEmptyLines: true,
+          transformHeader: (header) => header.trim(),
+        });
+
+        if (parsedEvents.errors.length > 0) {
+          this.logger.error('CSV parsing errors:', parsedEvents.errors);
+        }
+
+        eventDocs = parsedEvents.data.map((row, index) => {
+          return new Document({
+            pageContent: JSON.stringify(row),
+            metadata: {
+              source: resolvedEventsPath,
+              line: index + 2,
+              ...row,
+            },
+          });
+        });
+
+        this.logger.log(
+          `Raw event docs loaded: ${JSON.stringify(
+            eventDocs[0]?.metadata || {},
+            null,
+            2,
+          )}`,
+        );
+        if (!eventDocs || eventDocs.length === 0) {
+          throw new Error('No events loaded from CSV');
+        }
+      } catch (error) {
+        this.logger.error(
+          `Error loading events CSV: ${(error as Error).message}`,
+        );
+        throw error;
+      }
+
+      const enrichedEventDocs = eventDocs.map((doc) => {
+        const metadata = (doc.metadata || {}) as EventMetadata;
+
+        // ✅ Keep both: human-readable text + structured metadata
+        const semanticText = `
+Event Name: ${metadata.event_name}
+Event ID: ${metadata.event_api_id}
+Location: ${metadata.city}, ${metadata.region}, ${metadata.country}
+Address: ${metadata.full_address}
+Start Date: ${metadata.start_at}
+End Date: ${metadata.end_at}
+Timezone: ${metadata.timezone}
+Event Type: ${metadata.location_type} ${metadata.event_type}
+Total Guests: ${metadata.guest_count} attendees
+Total Tickets: ${metadata.ticket_count}
+Free Event: ${metadata.is_free}
+Requires Approval: ${metadata.require_approval}
+Calendar: ${metadata.calendar_name}
+Calendar ID: ${metadata.calendar_api_id}
+Hosts: ${metadata.hosts}
+Cover Image: ${metadata.cover_url}
+Event URL: https://lu.ma/${metadata.event_url}
+      `.trim();
+
+        return new Document({
+          pageContent: semanticText,
+          metadata: {
+            // ✅ Keep ALL original metadata for filtering
+            doc_type: 'event',
+            event_api_id: metadata.event_api_id,
+            event_name: metadata.event_name,
+            event_url: metadata.event_url,
+            start_at: metadata.start_at,
+            end_at: metadata.end_at,
+            timezone: metadata.timezone,
+            location_type: metadata.location_type,
+            event_type: metadata.event_type,
+            visibility: metadata.visibility,
+            guest_count: parseInt(metadata.guest_count) || 0,
+            ticket_count: parseInt(metadata.ticket_count) || 0,
+            is_free: metadata.is_free === 'true',
+            require_approval: metadata.require_approval === 'true',
+            calendar_name: metadata.calendar_name,
+            calendar_api_id: metadata.calendar_api_id,
+            city: metadata.city,
+            region: metadata.region,
+            country: metadata.country,
+            full_address: metadata.full_address,
+            latitude: parseFloat(metadata.latitude) || null,
+            longitude: parseFloat(metadata.longitude) || null,
+            cover_url: metadata.cover_url,
+            hosts: metadata.hosts,
+            host_ids: metadata.host_ids,
+          },
+        });
+      });
+
+      allDocs.push(...enrichedEventDocs);
+      this.logger.log(`Loaded ${eventDocs.length} event documents`);
+
+      // ============= GUESTS =============
+      this.logger.log(`Loading guests from: ${resolvedGuestsPath}`);
+      const guestsFileContent = await fs.readFile(resolvedGuestsPath, 'utf-8');
+      const parsedGuests = Papa.parse<GuestMetadata>(guestsFileContent, {
+        header: true,
+        skipEmptyLines: true,
+        transformHeader: (header) => header.trim(),
+      });
+
+      if (parsedGuests.errors.length > 0) {
+        this.logger.error('CSV parsing errors:', parsedGuests.errors);
+      }
+
+      const guestDocs = parsedGuests.data.map((row, index) => {
+        return new Document({
+          pageContent: JSON.stringify(row),
+          metadata: {
+            source: resolvedGuestsPath,
+            line: index + 2,
+            ...row,
+          },
+        });
+      });
+
+      const enrichedGuestDocs = guestDocs.map((doc) => {
+        const metadata = (doc.metadata || {}) as GuestMetadata;
+
+        // ✅ Include event relationship in semantic text
+        const semanticText = `
+Guest Name: ${metadata.guest_name}
+Guest ID: ${metadata.guest_api_id}
+Username: ${metadata.username}
+Bio: ${metadata.bio_short}
+Website: ${metadata.website}
+Timezone: ${metadata.timezone}
+Attending Event: ${metadata.event_name}
+Event ID: ${metadata.event_api_id}
+Number of Tickets: ${metadata.num_tickets_registered}
+Section: ${metadata.section_label}
+Social Media:
+  - Twitter: @${metadata.twitter_handle}
+  - LinkedIn: ${metadata.linkedin_handle}
+  - Instagram: @${metadata.instagram_handle}
+  - YouTube: ${metadata.youtube_handle}
+  - TikTok: @${metadata.tiktok_handle}
+Avatar: ${metadata.avatar_url}
+Last Online: ${metadata.last_online_at}
+      `.trim();
+
+        return new Document({
+          pageContent: semanticText,
+          metadata: {
+            // ✅ Keep ALL original metadata for filtering
+            doc_type: 'guest',
+            event_api_id: metadata.event_api_id, // ⭐ CRITICAL for filtering
+            event_name: metadata.event_name,
+            guest_api_id: metadata.guest_api_id,
+            guest_name: metadata.guest_name,
+            username: metadata.username,
+            website: metadata.website,
+            timezone: metadata.timezone,
+            bio_short: metadata.bio_short,
+            avatar_url: metadata.avatar_url,
+            twitter_handle: metadata.twitter_handle,
+            linkedin_handle: metadata.linkedin_handle,
+            instagram_handle: metadata.instagram_handle,
+            youtube_handle: metadata.youtube_handle,
+            tiktok_handle: metadata.tiktok_handle,
+            last_online_at: metadata.last_online_at,
+            num_tickets_registered:
+              parseInt(metadata.num_tickets_registered) || 1,
+            section_label: metadata.section_label,
+          },
+        });
+      });
+
+      allDocs.push(...enrichedGuestDocs);
+      this.logger.log(`Loaded ${guestDocs.length} guest documents`);
 
       // Split into chunks
       const splitter = new RecursiveCharacterTextSplitter({
         chunkSize: 1000,
         chunkOverlap: 200,
       });
-      const chunks = await splitter.splitDocuments(docs);
+      const chunks = await splitter.splitDocuments(allDocs);
+      this.logger.log(`Split into ${chunks.length} chunks`);
 
-      if (!this.embeddings || !this.pineconeIndex) {
-        throw new Error('Embeddings or Pinecone index not initialized');
-      }
+      // Get Pinecone index
+      const indexName = this.configService.get<string>(
+        'app.pinecone.indexName',
+      );
+      const index = this.pineconeClient.Index(indexName as string);
 
-      // Store documents in the existing vector store
+      // Create vector store
       this.vectorStore = await PineconeStore.fromDocuments(
         chunks,
         this.embeddings,
-        {
-          pineconeIndex: this.pineconeIndex,
-        },
+        { pineconeIndex: index },
       );
 
-      return { processedDocs: docs.length, chunks: chunks.length };
+      this.logger.log('Dual CSV ingestion completed successfully');
+      return {
+        processedDocs: allDocs.length,
+        chunks: chunks.length,
+        success: true,
+        message: `Ingested ${eventDocs.length} events and ${guestDocs.length} guests`,
+      };
     } catch (error) {
-      console.error('Error ingesting CSV:', error);
-      throw new Error(`Failed to ingest CSV: ${(error as Error).message}`);
+      this.logger.error(
+        `Error ingesting CSVs: ${(error as Error).message}`,
+        (error as Error).stack,
+      );
+      throw error;
     }
   }
 
-  // Step 2: Query with conversation memory
+  /**
+   * Legacy method for single CSV
+   */
+  async ingestCSV(filePath: string): Promise<IngestResult> {
+    await this.initialize();
+
+    try {
+      this.logger.log(`Starting CSV ingestion from: ${filePath}`);
+
+      const loader = new CSVLoader(filePath);
+      const docs = await loader.load();
+      this.logger.log(`Loaded ${docs.length} documents`);
+
+      if (docs.length === 0) {
+        return {
+          processedDocs: 0,
+          chunks: 0,
+          success: false,
+          message: 'No documents found in CSV file',
+        };
+      }
+
+      const splitter = new RecursiveCharacterTextSplitter({
+        chunkSize: 1000,
+        chunkOverlap: 200,
+      });
+      const chunks = await splitter.splitDocuments(docs);
+      this.logger.log(`Split into ${chunks.length} chunks`);
+
+      const indexName = this.configService.get<string>(
+        'app.pinecone.indexName',
+      );
+      const index = this.pineconeClient.Index(indexName as string);
+
+      this.vectorStore = await PineconeStore.fromDocuments(
+        chunks,
+        this.embeddings,
+        { pineconeIndex: index },
+      );
+
+      this.logger.log('CSV ingestion completed successfully');
+      return {
+        processedDocs: docs.length,
+        chunks: chunks.length,
+        success: true,
+        message: 'CSV ingested successfully',
+      };
+    } catch (error) {
+      this.logger.error(
+        `Error ingesting CSV: ${(error as Error).message}`,
+        (error as Error).stack,
+      );
+      throw error;
+    }
+  }
+
   async query(
     conversationId: string,
     question: string,
     filter?: Record<string, any>,
-  ): Promise<ChatResponseDto> {
-    await this.initialize();
-
-    // Get or create conversation chain
-    if (!this.conversations.has(conversationId)) {
-      const memory = new BufferMemory({
-        memoryKey: 'chat_history',
-        returnMessages: true,
-        outputKey: 'text',
-      });
-
+  ): Promise<QueryResult> {
+    try {
       if (!this.vectorStore) {
-        throw new Error('Vector store not initialized');
+        throw new Error(
+          'Vector store not initialized. Please ingest data first.',
+        );
       }
 
-      const chain = ConversationalRetrievalQAChain.fromLLM(
-        this.llm,
-        this.vectorStore.asRetriever({
-          k: 5,
-          filter, // Metadata filtering
-        }),
-        {
-          memory,
-          returnSourceDocuments: true,
-        },
-      );
+      this.logger.log(`Processing query for conversation: ${conversationId}`);
 
-      this.conversations.set(conversationId, chain);
-    }
+      if (!this.conversations.has(conversationId)) {
+        const memory = new BufferMemory({
+          memoryKey: 'chat_history',
+          returnMessages: true,
+          outputKey: 'text',
+        });
 
-    const chain = this.conversations.get(conversationId)!;
+        const chain = ConversationalRetrievalQAChain.fromLLM(
+          this.llm,
+          this.vectorStore.asRetriever({
+            k: 5,
+            filter,
+          }),
+          {
+            memory,
+            returnSourceDocuments: true,
+          },
+        );
 
-    try {
-      // Execute query
-      const response = await chain.invoke({ question });
+        this.conversations.set(conversationId, chain);
+        this.logger.log(`Created new conversation: ${conversationId}`);
+      }
+
+      const chain = this.conversations.get(conversationId)!;
+      type ChainResponse = {
+        text: string;
+        sourceDocuments?: Document[];
+      };
+
+      const response = (await chain.call({ question })) as ChainResponse;
+
+      this.logger.log(`Query processed successfully for: ${conversationId}`);
 
       if (!response || typeof response.text !== 'string') {
-        throw new Error('Invalid response from LLM');
+        throw new Error('Invalid response from chain');
       }
-
-      const sourceDocuments = Array.isArray(response.sourceDocuments)
-        ? response.sourceDocuments
-        : [];
 
       return {
         answer: response.text,
-        sources: sourceDocuments.map((doc: Record<string, unknown>) => ({
-          content: typeof doc?.pageContent === 'string' ? doc.pageContent : '',
-          metadata:
-            typeof doc?.metadata === 'object' && doc.metadata !== null
-              ? (doc.metadata as Record<string, any>)
-              : {},
+        sources: (response.sourceDocuments || []).map((doc) => ({
+          content: doc.pageContent || '',
+          metadata: doc.metadata || {},
         })),
       };
     } catch (error) {
-      console.error('Error executing query:', error);
-      throw new Error(`Failed to process query: ${(error as Error).message}`);
+      this.logger.error(
+        `Error processing query: ${(error as Error).message}`,
+        (error as Error).stack,
+      );
+      throw error;
     }
   }
 

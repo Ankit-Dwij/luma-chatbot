@@ -4,14 +4,15 @@ import {
   Body,
   HttpCode,
   HttpStatus,
-  //   Get,
-  //   Param,
-  //   Delete,
   UseInterceptors,
   UploadedFile,
+  UploadedFiles,
   BadRequestException,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  FileInterceptor,
+  FileFieldsInterceptor,
+} from '@nestjs/platform-express';
 import {
   ApiTags,
   ApiOperation,
@@ -21,20 +22,14 @@ import {
 } from '@nestjs/swagger';
 import { diskStorage } from 'multer';
 import type { Request } from 'express';
-import { extname } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
-interface UploadedFile {
-  fieldname: string;
-  originalname: string;
-  encoding: string;
-  mimetype: string;
-  size: number;
-  destination: string;
-  filename: string;
-  path: string;
-  buffer: Buffer;
-}
+import type {
+  FileNameCallback,
+  UploadedFileType,
+  FileFields,
+} from './types/file-upload.types';
+import { generateFilename, csvFileFilter } from './types/file-upload.types';
 import { RAGServiceWithLangChain } from './rag.service';
 import { IngestCSVDto } from './dto/ingest-csv.dto';
 import { ChatResponseDto } from './dto/chat-response.dto';
@@ -60,6 +55,96 @@ export class RagController {
     return await this.ragService.ingestCSV(ingestDto.filePath);
   }
 
+  @Post('ingest/both/upload')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'events', maxCount: 1 },
+        { name: 'guests', maxCount: 1 },
+      ],
+      {
+        storage: diskStorage({
+          destination: './uploads',
+          filename: (
+            req: Request,
+            file: UploadedFileType,
+            cb: FileNameCallback,
+          ) => {
+            const prefix = file.fieldname === 'events' ? 'events-' : 'guests-';
+            generateFilename(req, file, cb, prefix);
+          },
+        }) as any,
+        fileFilter: csvFileFilter,
+      },
+    ),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({
+    summary: 'Upload and ingest both events and guests CSV files',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        events: {
+          type: 'string',
+          format: 'binary',
+          description: 'Events CSV file',
+        },
+        guests: {
+          type: 'string',
+          format: 'binary',
+          description: 'Guests CSV file',
+        },
+      },
+      required: ['events', 'guests'],
+    },
+  })
+  async uploadAndIngestBoth(@UploadedFiles() files: FileFields) {
+    if (!files?.events?.[0]?.path) {
+      throw new BadRequestException('Events file is required');
+    }
+    if (!files?.guests?.[0]?.path) {
+      throw new BadRequestException('Guests file is required');
+    }
+
+    return await this.ragService.ingestBothCSVs(
+      files.events[0].path,
+      files.guests[0].path,
+    );
+  }
+
+  @Post('ingest/both')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Ingest both events and guests CSV files from paths',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        eventsPath: {
+          type: 'string',
+          description: 'Path to events CSV file',
+        },
+        guestsPath: {
+          type: 'string',
+          description: 'Path to guests CSV file',
+        },
+      },
+      required: ['eventsPath', 'guestsPath'],
+    },
+  })
+  async ingestBothCSVs(
+    @Body() body: { eventsPath: string; guestsPath: string },
+  ) {
+    return await this.ragService.ingestBothCSVs(
+      body.eventsPath,
+      body.guestsPath,
+    );
+  }
+
   @Post('ingest/upload')
   @HttpCode(HttpStatus.OK)
   @UseInterceptors(
@@ -67,30 +152,14 @@ export class RagController {
       storage: diskStorage({
         destination: './uploads',
         filename: (
-          _req: Request,
-          file: UploadedFile,
-          cb: (error: Error | null, filename: string) => void,
+          req: Request,
+          file: UploadedFileType,
+          cb: FileNameCallback,
         ) => {
-          try {
-            const randomName = uuidv4();
-            const extension = extname(file.originalname);
-            cb(null, `${randomName}${extension}`);
-          } catch (error) {
-            cb(error as Error, '');
-          }
+          generateFilename(req, file, cb);
         },
       }) as any,
-      fileFilter: (
-        _req: Request,
-        file: UploadedFile,
-        cb: (error: Error | null, acceptFile: boolean) => void,
-      ) => {
-        if (file.mimetype !== 'text/csv') {
-          cb(new BadRequestException('Only CSV files are allowed'), false);
-          return;
-        }
-        cb(null, true);
-      },
+      fileFilter: csvFileFilter,
     }),
   )
   @ApiConsumes('multipart/form-data')
@@ -106,8 +175,8 @@ export class RagController {
       },
     },
   })
-  async uploadAndIngest(@UploadedFile() file: UploadedFile) {
-    if (!file || !file.path) {
+  async uploadAndIngest(@UploadedFile() file: UploadedFileType) {
+    if (!file?.path) {
       throw new BadRequestException('No file uploaded or invalid file');
     }
 
