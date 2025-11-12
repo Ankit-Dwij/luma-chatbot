@@ -21,7 +21,7 @@ export default registerAs<AppConfig>('app', () => {
   return {
     openai: {
       apiKey: process.env.OPENAI_API_KEY || '',
-      model: process.env.OPENAI_MODEL || 'gpt-4-turbo-preview',
+      model: process.env.OPENAI_MODEL || 'gpt-4.1',
       embeddingModel:
         process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small',
     },

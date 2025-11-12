@@ -13,6 +13,13 @@ import { ConfigService } from '@nestjs/config';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import * as Papa from 'papaparse';
+import { ChatPromptTemplate } from '@langchain/core/prompts';
+import { createStuffDocumentsChain } from 'langchain/chains/combine_documents';
+import { createRetrievalChain } from 'langchain/chains/retrieval';
+import { createHistoryAwareRetriever } from 'langchain/chains/history_aware_retriever';
+import { MessagesPlaceholder } from '@langchain/core/prompts';
+import { AIMessage, HumanMessage } from '@langchain/core/messages';
+
 // Local result types used by the service
 export type EventMetadata = {
   event_api_id: string;
@@ -77,7 +84,13 @@ export type QueryResult = {
 export class RAGServiceWithLangChain {
   private vectorStore: PineconeStore;
   private llm: ChatOpenAI;
-  private conversations: Map<string, ConversationalRetrievalQAChain>;
+  private conversations: Map<
+    string,
+    {
+      chain: any;
+      chatHistory: Array<HumanMessage | AIMessage>;
+    }
+  > = new Map();
   private embeddings: OpenAIEmbeddings;
   private pineconeIndex: PineconeIndex;
   private pineconeClient: Pinecone;
@@ -105,12 +118,12 @@ export class RAGServiceWithLangChain {
     this.llm = new ChatOpenAI({
       modelName: this.configService.get<string>('app.openai.model'),
       apiKey: this.configService.get<string>('app.openai.apiKey'),
-      temperature: 0.3,
+      // temperature: 0.3,
     });
 
     // Initialize embeddings
     this.embeddings = new OpenAIEmbeddings({
-      modelName: 'text-embedding-ada-002',
+      modelName: 'text-embedding-3-small',
       apiKey: this.configService.getOrThrow<string>('app.openai.apiKey'),
     });
 
@@ -461,6 +474,8 @@ Last Online: ${metadata.last_online_at}
     filter?: Record<string, any>,
   ): Promise<QueryResult> {
     try {
+      await this.initialize();
+
       if (!this.vectorStore) {
         throw new Error(
           'Vector store not initialized. Please ingest data first.',
@@ -470,49 +485,125 @@ Last Online: ${metadata.last_online_at}
       this.logger.log(`Processing query for conversation: ${conversationId}`);
 
       if (!this.conversations.has(conversationId)) {
-        const memory = new BufferMemory({
-          memoryKey: 'chat_history',
-          returnMessages: true,
-          outputKey: 'text',
-        });
+        // Create a prompt for rephrasing questions based on chat history
+        const historyAwarePrompt = ChatPromptTemplate.fromMessages([
+          new MessagesPlaceholder('chat_history'),
+          ['user', '{input}'],
+          [
+            'user',
+            'Given the above conversation, generate a search query to look up relevant information.',
+          ],
+        ]);
 
-        const chain = ConversationalRetrievalQAChain.fromLLM(
-          this.llm,
-          this.vectorStore.asRetriever({
-            k: 5,
+        // Create history-aware retriever
+        const historyAwareRetriever = await createHistoryAwareRetriever({
+          llm: this.llm,
+          retriever: this.vectorStore.asRetriever({
+            k: 50,
             filter,
           }),
-          {
-            memory,
-            returnSourceDocuments: true,
-          },
-        );
+          rephrasePrompt: historyAwarePrompt,
+        });
 
-        this.conversations.set(conversationId, chain);
+        // Create the main QA prompt with system instructions
+        const qaPrompt = ChatPromptTemplate.fromMessages([
+          // existing/primary system message (kept intentionally brief)
+          ['system', ``],
+          // second system-level instruction: data-savvy event assistant
+          [
+            'system',
+            `You are EventBot, an assistant for event and guest management.
+
+Use the provided context to answer questions about:
+- Events: name, location, start and end dates, guest counts, founder counts.
+- Guests: names, roles, their respective bios which events they are attending
+- Founders: who they are, which events they attend
+- Education or workplaces: search the bio of each guest/attendee for company or college. If not mentioned, return "Unknown"
+- Socials: extract Instagram(Instagram:), Twitter, YouTube, TikTok handles exactly as in context. If none, return "Unknown"
+- If asked which events are allumini (guest name) of this college( college can be IIT, MIT, Havard etc please use keyword they provided) use the "college_univerity_allumi_of:" in the guest list to find the answer. if the keyword is not found there search in the "Bio:" of the guest list.
+-If the user asks can you tell me which events this guest (they will give a name eg Prateek) from this organisation ( can use term like works, founder , from) is going. Use the name of the guest and Company_or_organisation_they_work_for
+ to find this particular person and then list out the event in which they appear in guest list. If only one of them is given, then say "Please provide more information".
+ - To answer question related to number of guest coming for the event use the total guest metadata in the REGISTRATION & ATTENDANCE.
+ -To answer question related to number of founder coming for the event use the Total Founders metadata in the REGISTRATION & ATTENDANCE.
+
+When checking for educational institutions or workplaces:
+- Look for variations or abbreviations (e.g., "IIT", "Indian Institute of Technology", "IITD", "IIT Delhi", "Harvard", "Harvard University").
+- Use context clues from the guest bio to detect likely institutions, but do not assume.
+- If you find no clear match, respond with "I don't have enough information for that."
+ 
+
+Rules:
+1. Answer only from the provided context. Do NOT make assumptions or guesses.
+2. For counts, numbers, or dates, use the exact values from the context.
+3. For missing or empty fields, ALWAYS respond with "Unknown" or "I don't have enough information for that."
+4. Keep answers concise, clear, and natural.
+5. When multiple events or guests exist, clearly specify which event or guest your answer refers to.
+6. For complex questions (e.g., who attended multiple events, cross-check founders), only provide information if it can be directly inferred from context; otherwise return "I don't have enough information for that."
+
+
+Example:
+- Question: Who works at StationX.network?
+- Answer: Rish works at StationX.network
+- Question: What is the Instagram handle of Aeron B?
+- Answer: arankk
+-Question: Prateek from blocmates is going to which events?
+-Answer: He is going to **Build Buddies Hanoi**, **LabWeek Web3 Opening Party:** .
+-Question: Which events have allumini from IIT mumbai?
+
+
+Context: {context}
+`,
+          ],
+          new MessagesPlaceholder('chat_history'),
+          ['user', '{input}'],
+        ]);
+
+        // Create the document combination chain
+        const documentChain = await createStuffDocumentsChain({
+          llm: this.llm,
+          prompt: qaPrompt,
+        });
+
+        // Create the final retrieval chain
+        const retrievalChain = await createRetrievalChain({
+          combineDocsChain: documentChain,
+          retriever: historyAwareRetriever,
+        });
+
+        // Store chain and empty chat history
+        this.conversations.set(conversationId, {
+          chain: retrievalChain,
+          chatHistory: [],
+        });
+
         this.logger.log(`Created new conversation: ${conversationId}`);
       }
 
-      const chain = this.conversations.get(conversationId)!;
-      type ChainResponse = {
-        text: string;
-        sourceDocuments?: Document[];
-      };
+      const { chain, chatHistory } = this.conversations.get(conversationId)!;
 
-      const response = (await chain.call({ question })) as ChainResponse;
+      // Invoke the chain
+      const response = await chain.invoke({
+        input: question,
+        chat_history: chatHistory,
+      });
+
+      // Update chat history
+      chatHistory.push(new HumanMessage(question));
+      chatHistory.push(new AIMessage(response.answer));
 
       this.logger.log(`Query processed successfully for: ${conversationId}`);
 
-      if (!response || typeof response.text !== 'string') {
+      if (!response || typeof response.answer !== 'string') {
         throw new Error('Invalid response from chain');
       }
 
       return {
-        answer: response.text,
-        sources: (response.sourceDocuments || []).map((doc) => ({
-          content: doc.pageContent || '',
-          metadata: doc.metadata || {},
-        })),
-      };
+        answer: response.answer,
+        // sources: (response.context || []).map((doc: any) => ({
+        //   content: doc.pageContent || '',
+        //   metadata: doc.metadata || {},
+        // })),
+      } as any;
     } catch (error) {
       this.logger.error(
         `Error processing query: ${(error as Error).message}`,
@@ -521,7 +612,6 @@ Last Online: ${metadata.last_online_at}
       throw error;
     }
   }
-
   // Clear conversation history
   clearConversation(conversationId: string) {
     this.conversations.delete(conversationId);
