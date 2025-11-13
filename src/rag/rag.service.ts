@@ -383,18 +383,29 @@ Last Online: ${metadata.last_online_at}
       const chunks = await splitter.splitDocuments(allDocs);
       this.logger.log(`Split into ${chunks.length} chunks`);
 
-      // Get Pinecone index
+      // Get Pinecone index (ensure it's initialized / consistent)
       const indexName = this.configService.get<string>(
         'app.pinecone.indexName',
       );
       const index = this.pineconeClient.Index(indexName as string);
 
-      // Create vector store
-      this.vectorStore = await PineconeStore.fromDocuments(
-        chunks,
-        this.embeddings,
-        { pineconeIndex: index },
-      );
+      // Ensure vector store is initialized for this index
+      if (!this.vectorStore) {
+        this.vectorStore = await PineconeStore.fromExistingIndex(
+          this.embeddings,
+          { pineconeIndex: index },
+        );
+      }
+
+      // 🚀 Batched upsert into Pinecone
+      const batchSize = 500; // you can tune this (e.g. 200, 500, 1000)
+      for (let i = 0; i < chunks.length; i += batchSize) {
+        const batch = chunks.slice(i, i + batchSize);
+        this.logger.log(
+          `Upserting batch ${i} – ${i + batch.length} of ${chunks.length}`,
+        );
+        await this.vectorStore.addDocuments(batch);
+      }
 
       this.logger.log('Dual CSV ingestion completed successfully');
       return {
@@ -406,62 +417,6 @@ Last Online: ${metadata.last_online_at}
     } catch (error) {
       this.logger.error(
         `Error ingesting CSVs: ${(error as Error).message}`,
-        (error as Error).stack,
-      );
-      throw error;
-    }
-  }
-
-  /**
-   * Legacy method for single CSV
-   */
-  async ingestCSV(filePath: string): Promise<IngestResult> {
-    await this.initialize();
-
-    try {
-      this.logger.log(`Starting CSV ingestion from: ${filePath}`);
-
-      const loader = new CSVLoader(filePath);
-      const docs = await loader.load();
-      this.logger.log(`Loaded ${docs.length} documents`);
-
-      if (docs.length === 0) {
-        return {
-          processedDocs: 0,
-          chunks: 0,
-          success: false,
-          message: 'No documents found in CSV file',
-        };
-      }
-
-      const splitter = new RecursiveCharacterTextSplitter({
-        chunkSize: 1000,
-        chunkOverlap: 200,
-      });
-      const chunks = await splitter.splitDocuments(docs);
-      this.logger.log(`Split into ${chunks.length} chunks`);
-
-      const indexName = this.configService.get<string>(
-        'app.pinecone.indexName',
-      );
-      const index = this.pineconeClient.Index(indexName as string);
-
-      this.vectorStore = await PineconeStore.fromDocuments(
-        chunks,
-        this.embeddings,
-        { pineconeIndex: index },
-      );
-
-      this.logger.log('CSV ingestion completed successfully');
-      return {
-        processedDocs: docs.length,
-        chunks: chunks.length,
-        success: true,
-        message: 'CSV ingested successfully',
-      };
-    } catch (error) {
-      this.logger.error(
-        `Error ingesting CSV: ${(error as Error).message}`,
         (error as Error).stack,
       );
       throw error;
@@ -499,7 +454,12 @@ Last Online: ${metadata.last_online_at}
         const historyAwareRetriever = await createHistoryAwareRetriever({
           llm: this.llm,
           retriever: this.vectorStore.asRetriever({
-            k: 50,
+            k: 100,
+            searchType: 'mmr',
+            searchKwargs: {
+              fetchK: 200,
+              lambda: 0.5,
+            },
             filter,
           }),
           rephrasePrompt: historyAwarePrompt,
@@ -539,6 +499,7 @@ Rules:
 4. Keep answers concise, clear, and natural.
 5. When multiple events or guests exist, clearly specify which event or guest your answer refers to.
 6. For complex questions (e.g., who attended multiple events, cross-check founders), only provide information if it can be directly inferred from context; otherwise return "I don't have enough information for that."
+7. When asked for lists (e.g., "all events", "all founders"), include EVERY matching result from the context provided and count the total number clearly.
 
 
 Example:

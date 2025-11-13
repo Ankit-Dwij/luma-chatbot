@@ -40,20 +40,20 @@ import { ChatQueryDto } from './dto/chat-query.dto';
 export class RagController {
   constructor(private readonly ragService: RAGServiceWithLangChain) {}
 
-  @Post('ingest')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Ingest CSV file into vector database' })
-  @ApiResponse({
-    status: 200,
-    description: 'CSV file ingested successfully',
-  })
-  @ApiResponse({
-    status: 400,
-    description: 'Invalid file path or CSV format',
-  })
-  async ingestCSV(@Body() ingestDto: IngestCSVDto) {
-    return await this.ragService.ingestCSV(ingestDto.filePath);
-  }
+  // @Post('ingest')
+  // @HttpCode(HttpStatus.OK)
+  // @ApiOperation({ summary: 'Ingest CSV file into vector database' })
+  // @ApiResponse({
+  //   status: 200,
+  //   description: 'CSV file ingested successfully',
+  // })
+  // @ApiResponse({
+  //   status: 400,
+  //   description: 'Invalid file path or CSV format',
+  // })
+  // async ingestCSV(@Body() ingestDto: IngestCSVDto) {
+  //   return await this.ragService.ingestCSV(ingestDto.filePath);
+  // }
 
   @Post('ingest/both/upload')
   @HttpCode(HttpStatus.OK)
@@ -145,43 +145,43 @@ export class RagController {
     );
   }
 
-  @Post('ingest/upload')
-  @HttpCode(HttpStatus.OK)
-  @UseInterceptors(
-    FileInterceptor('file', {
-      storage: diskStorage({
-        destination: './uploads',
-        filename: (
-          req: Request,
-          file: UploadedFileType,
-          cb: FileNameCallback,
-        ) => {
-          generateFilename(req, file, cb);
-        },
-      }) as any,
-      fileFilter: csvFileFilter,
-    }),
-  )
-  @ApiConsumes('multipart/form-data')
-  @ApiOperation({ summary: 'Upload and ingest CSV file' })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        file: {
-          type: 'string',
-          format: 'binary',
-        },
-      },
-    },
-  })
-  async uploadAndIngest(@UploadedFile() file: UploadedFileType) {
-    if (!file?.path) {
-      throw new BadRequestException('No file uploaded or invalid file');
-    }
+  // @Post('ingest/upload')
+  // @HttpCode(HttpStatus.OK)
+  // @UseInterceptors(
+  //   FileInterceptor('file', {
+  //     storage: diskStorage({
+  //       destination: './uploads',
+  //       filename: (
+  //         req: Request,
+  //         file: UploadedFileType,
+  //         cb: FileNameCallback,
+  //       ) => {
+  //         generateFilename(req, file, cb);
+  //       },
+  //     }) as any,
+  //     fileFilter: csvFileFilter,
+  //   }),
+  // )
+  // @ApiConsumes('multipart/form-data')
+  // @ApiOperation({ summary: 'Upload and ingest CSV file' })
+  // @ApiBody({
+  //   schema: {
+  //     type: 'object',
+  //     properties: {
+  //       file: {
+  //         type: 'string',
+  //         format: 'binary',
+  //       },
+  //     },
+  //   },
+  // })
+  // async uploadAndIngest(@UploadedFile() file: UploadedFileType) {
+  //   if (!file?.path) {
+  //     throw new BadRequestException('No file uploaded or invalid file');
+  //   }
 
-    return await this.ragService.ingestCSV(file.path);
-  }
+  //   return await this.ragService.ingestCSV(file.path);
+  // }
 
   @Post('chat')
   @HttpCode(HttpStatus.OK)
