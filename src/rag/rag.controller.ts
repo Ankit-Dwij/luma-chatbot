@@ -55,95 +55,95 @@ export class RagController {
   //   return await this.ragService.ingestCSV(ingestDto.filePath);
   // }
 
-  @Post('ingest/both/upload')
-  @HttpCode(HttpStatus.OK)
-  @UseInterceptors(
-    FileFieldsInterceptor(
-      [
-        { name: 'events', maxCount: 1 },
-        { name: 'guests', maxCount: 1 },
-      ],
-      {
-        storage: diskStorage({
-          destination: './uploads',
-          filename: (
-            req: Request,
-            file: UploadedFileType,
-            cb: FileNameCallback,
-          ) => {
-            const prefix = file.fieldname === 'events' ? 'events-' : 'guests-';
-            generateFilename(req, file, cb, prefix);
-          },
-        }) as any,
-        fileFilter: csvFileFilter,
-      },
-    ),
-  )
-  @ApiConsumes('multipart/form-data')
-  @ApiOperation({
-    summary: 'Upload and ingest both events and guests CSV files',
-  })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        events: {
-          type: 'string',
-          format: 'binary',
-          description: 'Events CSV file',
-        },
-        guests: {
-          type: 'string',
-          format: 'binary',
-          description: 'Guests CSV file',
-        },
-      },
-      required: ['events', 'guests'],
-    },
-  })
-  async uploadAndIngestBoth(@UploadedFiles() files: FileFields) {
-    if (!files?.events?.[0]?.path) {
-      throw new BadRequestException('Events file is required');
-    }
-    if (!files?.guests?.[0]?.path) {
-      throw new BadRequestException('Guests file is required');
-    }
+  // @Post('ingest/both/upload')
+  // @HttpCode(HttpStatus.OK)
+  // @UseInterceptors(
+  //   FileFieldsInterceptor(
+  //     [
+  //       { name: 'events', maxCount: 1 },
+  //       { name: 'guests', maxCount: 1 },
+  //     ],
+  //     {
+  //       storage: diskStorage({
+  //         destination: './uploads',
+  //         filename: (
+  //           req: Request,
+  //           file: UploadedFileType,
+  //           cb: FileNameCallback,
+  //         ) => {
+  //           const prefix = file.fieldname === 'events' ? 'events-' : 'guests-';
+  //           generateFilename(req, file, cb, prefix);
+  //         },
+  //       }) as any,
+  //       fileFilter: csvFileFilter,
+  //     },
+  //   ),
+  // )
+  // @ApiConsumes('multipart/form-data')
+  // @ApiOperation({
+  //   summary: 'Upload and ingest both events and guests CSV files',
+  // })
+  // @ApiBody({
+  //   schema: {
+  //     type: 'object',
+  //     properties: {
+  //       events: {
+  //         type: 'string',
+  //         format: 'binary',
+  //         description: 'Events CSV file',
+  //       },
+  //       guests: {
+  //         type: 'string',
+  //         format: 'binary',
+  //         description: 'Guests CSV file',
+  //       },
+  //     },
+  //     required: ['events', 'guests'],
+  //   },
+  // })
+  // async uploadAndIngestBoth(@UploadedFiles() files: FileFields) {
+  //   if (!files?.events?.[0]?.path) {
+  //     throw new BadRequestException('Events file is required');
+  //   }
+  //   if (!files?.guests?.[0]?.path) {
+  //     throw new BadRequestException('Guests file is required');
+  //   }
 
-    return await this.ragService.ingestBothCSVs(
-      files.events[0].path,
-      files.guests[0].path,
-    );
-  }
+  //   return await this.ragService.ingestBothCSVs(
+  //     files.events[0].path,
+  //     files.guests[0].path,
+  //   );
+  // }
 
-  @Post('ingest/both')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Ingest both events and guests CSV files from paths',
-  })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        eventsPath: {
-          type: 'string',
-          description: 'Path to events CSV file',
-        },
-        guestsPath: {
-          type: 'string',
-          description: 'Path to guests CSV file',
-        },
-      },
-      required: ['eventsPath', 'guestsPath'],
-    },
-  })
-  async ingestBothCSVs(
-    @Body() body: { eventsPath: string; guestsPath: string },
-  ) {
-    return await this.ragService.ingestBothCSVs(
-      body.eventsPath,
-      body.guestsPath,
-    );
-  }
+  // @Post('ingest/both')
+  // @HttpCode(HttpStatus.OK)
+  // @ApiOperation({
+  //   summary: 'Ingest both events and guests CSV files from paths',
+  // })
+  // @ApiBody({
+  //   schema: {
+  //     type: 'object',
+  //     properties: {
+  //       eventsPath: {
+  //         type: 'string',
+  //         description: 'Path to events CSV file',
+  //       },
+  //       guestsPath: {
+  //         type: 'string',
+  //         description: 'Path to guests CSV file',
+  //       },
+  //     },
+  //     required: ['eventsPath', 'guestsPath'],
+  //   },
+  // })
+  // async ingestBothCSVs(
+  //   @Body() body: { eventsPath: string; guestsPath: string },
+  // ) {
+  //   return await this.ragService.ingestBothCSVs(
+  //     body.eventsPath,
+  //     body.guestsPath,
+  //   );
+  // }
 
   // @Post('ingest/upload')
   // @HttpCode(HttpStatus.OK)
