@@ -5,7 +5,7 @@ FROM node:20.14.0-alpine AS builder
 RUN apk add --no-cache bash
 
 # Install global packages 
-RUN npm install -g @nestjs/cli typescript ts-node 
+RUN npm install -g @nestjs/cli typescript ts-node
 
 WORKDIR /usr/src/app
 
@@ -22,7 +22,6 @@ RUN npm run build
 
 # Stage 2: Create a smaller image for production
 FROM node:20.14.0-alpine
-
 
 WORKDIR /usr/src/app
 

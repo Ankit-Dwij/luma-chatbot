@@ -1,7 +1,4 @@
-import { CSVLoader } from '@langchain/community/document_loaders/fs/csv';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
-import { BufferMemory } from 'langchain/memory';
-import { ConversationalRetrievalQAChain } from 'langchain/chains';
 import { PineconeStore } from '@langchain/pinecone';
 import { OpenAIEmbeddings } from '@langchain/openai';
 import { ChatOpenAI } from '@langchain/openai';
@@ -19,6 +16,8 @@ import { createRetrievalChain } from 'langchain/chains/retrieval';
 import { createHistoryAwareRetriever } from 'langchain/chains/history_aware_retriever';
 import { MessagesPlaceholder } from '@langchain/core/prompts';
 import { AIMessage, HumanMessage } from '@langchain/core/messages';
+import { RunnableLambda } from '@langchain/core/runnables';
+import { BM25Retriever } from '@langchain/community/retrievers/bm25';
 
 // Local result types used by the service
 export type EventMetadata = {
@@ -98,6 +97,10 @@ export class RAGServiceWithLangChain {
   private initialized = false;
   private readonly projectRoot = process.cwd();
 
+  // 🔹 In-memory CSV data for lexical search
+  private allEvents: EventMetadata[] | null = null;
+  private allGuests: GuestMetadata[] | null = null;
+
   private resolvePath(filePath: string): string {
     // If it's already an absolute path starting with /, return as is
     if (filePath.startsWith('/')) {
@@ -109,6 +112,128 @@ export class RAGServiceWithLangChain {
 
   constructor(private readonly configService: ConfigService) {
     this.conversations = new Map();
+  }
+
+  private async loadCsvDataIfNeeded() {
+    if (this.allEvents && this.allGuests) return;
+
+    const eventsPath = this.resolvePath('data/events.csv');
+    const guestsPath = this.resolvePath('data/all_guests.csv');
+
+    this.logger.log(`Loading CSV data into memory:
+      Events: ${eventsPath}
+      Guests: ${guestsPath}
+    `);
+
+    const [eventsFileContent, guestsFileContent] = await Promise.all([
+      fs.readFile(eventsPath, 'utf-8'),
+      fs.readFile(guestsPath, 'utf-8'),
+    ]);
+
+    const parsedEvents = Papa.parse<EventMetadata>(eventsFileContent, {
+      header: true,
+      skipEmptyLines: true,
+      transformHeader: (header) => header.trim(),
+    });
+
+    const parsedGuests = Papa.parse<GuestMetadata>(guestsFileContent, {
+      header: true,
+      skipEmptyLines: true,
+      transformHeader: (header) => header.trim(),
+    });
+
+    this.allEvents = parsedEvents.data.filter(
+      (e) => !!e.event_api_id && !!e.event_name,
+    );
+    this.allGuests = parsedGuests.data.filter(
+      (g) => !!g.guest_api_id && !!g.guest_name,
+    );
+
+    this.logger.log(
+      `Loaded ${this.allEvents.length} events and ${this.allGuests.length} guests into memory`,
+    );
+  }
+
+  private guestBm25: BM25Retriever | null = null;
+
+  private async buildGuestBm25Index() {
+    await this.loadCsvDataIfNeeded();
+    if (!this.allGuests || this.allGuests.length === 0) return;
+
+    const docs = this.allGuests.map((guest) => {
+      // 🚫 Strip name + all social fields from what goes into metadata
+      const {
+        guest_name,
+        username,
+        twitter_handle,
+        linkedin_handle,
+        instagram_handle,
+        youtube_handle,
+        tiktok_handle,
+        // you can add more here if new social fields are added
+        ...safeGuest
+      } = guest;
+
+      return new Document({
+        pageContent: `
+          ${guest.event_name}
+          ${guest.bio_short}
+        `.trim(),
+        metadata: {
+          doc_type: 'guest_bm25',
+          // ✅ Only safe fields are exposed here
+          ...safeGuest,
+        },
+      });
+    });
+
+    this.guestBm25 = await BM25Retriever.fromDocuments(docs, {
+      k: 30, // how many BM25 hits you want per query
+    });
+  }
+
+  private async lexicalSearchDocs(
+    query: string,
+    filter?: Record<string, any>,
+  ): Promise<Document[]> {
+    await this.buildGuestBm25Index();
+    if (!this.guestBm25) return [];
+
+    // 🧹 Sanitize query for BM25 to avoid invalid regex tokens like "?"
+    const safeQuery = (query || '')
+      // replace non-letter/digit/space with space
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!safeQuery) {
+      this.logger.warn(
+        `lexicalSearchDocs: query "${query}" became empty after sanitization, skipping BM25`,
+      );
+      return [];
+    }
+
+    let docs: Document[] = [];
+    try {
+      docs = await this.guestBm25.getRelevantDocuments(safeQuery);
+    } catch (err) {
+      this.logger.error(
+        `BM25 getRelevantDocuments failed for query "${safeQuery}": ${
+          (err as Error).message
+        }`,
+      );
+      return [];
+    }
+
+    // Optional: post-filter by event if filter has event_api_id
+    if (filter?.event_api_id) {
+      docs = docs.filter(
+        (d) => d.metadata?.event_api_id === filter.event_api_id,
+      );
+    }
+
+    const MAX_LEXICAL_DOCS = 30;
+    return docs.slice(0, MAX_LEXICAL_DOCS);
   }
 
   private async initialize() {
@@ -152,6 +277,10 @@ export class RAGServiceWithLangChain {
         this.embeddings,
         { pineconeIndex: this.pineconeIndex },
       );
+
+      // 🔹 Load CSV data once at startup for lexical search
+      await this.loadCsvDataIfNeeded();
+
       this.initialized = true;
     } catch (error) {
       console.error('Failed to initialize vector store:', error);
@@ -325,22 +454,14 @@ Event URL: https://lu.ma/${metadata.event_url}
 
         // ✅ Include event relationship in semantic text
         const semanticText = `
-Guest Name: ${metadata.guest_name}
 Guest ID: ${metadata.guest_api_id}
-Username: ${metadata.username}
 Bio: ${metadata.bio_short}
-Website: ${metadata.website}
 Timezone: ${metadata.timezone}
 Attending Event: ${metadata.event_name}
 Event ID: ${metadata.event_api_id}
 Number of Tickets: ${metadata.num_tickets_registered}
 Section: ${metadata.section_label}
 Social Media:
-  - Twitter: @${metadata.twitter_handle}
-  - LinkedIn: ${metadata.linkedin_handle}
-  - Instagram: @${metadata.instagram_handle}
-  - YouTube: ${metadata.youtube_handle}
-  - TikTok: @${metadata.tiktok_handle}
 Avatar: ${metadata.avatar_url}
 Last Online: ${metadata.last_online_at}
       `.trim();
@@ -353,17 +474,9 @@ Last Online: ${metadata.last_online_at}
             event_api_id: metadata.event_api_id, // ⭐ CRITICAL for filtering
             event_name: metadata.event_name,
             guest_api_id: metadata.guest_api_id,
-            guest_name: metadata.guest_name,
-            username: metadata.username,
-            website: metadata.website,
             timezone: metadata.timezone,
             bio_short: metadata.bio_short,
             avatar_url: metadata.avatar_url,
-            twitter_handle: metadata.twitter_handle,
-            linkedin_handle: metadata.linkedin_handle,
-            instagram_handle: metadata.instagram_handle,
-            youtube_handle: metadata.youtube_handle,
-            tiktok_handle: metadata.tiktok_handle,
             last_online_at: metadata.last_online_at,
             num_tickets_registered:
               parseInt(metadata.num_tickets_registered) || 1,
@@ -383,13 +496,13 @@ Last Online: ${metadata.last_online_at}
       const chunks = await splitter.splitDocuments(allDocs);
       this.logger.log(`Split into ${chunks.length} chunks`);
 
-      // Get Pinecone index (ensure it's initialized / consistent)
+      // Get Pinecone index
       const indexName = this.configService.get<string>(
         'app.pinecone.indexName',
       );
       const index = this.pineconeClient.Index(indexName as string);
 
-      // Ensure vector store is initialized for this index
+      // Create vector store (batched upsert)
       if (!this.vectorStore) {
         this.vectorStore = await PineconeStore.fromExistingIndex(
           this.embeddings,
@@ -397,8 +510,7 @@ Last Online: ${metadata.last_online_at}
         );
       }
 
-      // 🚀 Batched upsert into Pinecone
-      const batchSize = 500; // you can tune this (e.g. 200, 500, 1000)
+      const batchSize = 500;
       for (let i = 0; i < chunks.length; i += batchSize) {
         const batch = chunks.slice(i, i + batchSize);
         this.logger.log(
@@ -450,18 +562,39 @@ Last Online: ${metadata.last_online_at}
           ],
         ]);
 
+        // Base semantic retriever from Pinecone
+        // Base semantic retriever from Pinecone
+        const baseRetriever = this.vectorStore.asRetriever({
+          k: 50,
+          searchType: 'mmr',
+          searchKwargs: {
+            fetchK: 100,
+            lambda: 0.5,
+          },
+          filter,
+        });
+
+        // Combined retriever: lexical (CSV bios) + vector, as a proper Runnable
+        const combinedRetriever = RunnableLambda.from(async (q: string) => {
+          const [vectorDocs, lexicalDocs] = await Promise.all([
+            baseRetriever.getRelevantDocuments(q),
+            this.lexicalSearchDocs(q, filter),
+          ]);
+
+          const MAX_LEXICAL_FOR_LLM = 30; // should match lexicalSearchDocs
+          const MAX_VECTOR_FOR_LLM = 50; // tune depending on how heavy you want
+
+          const trimmedLexical = lexicalDocs.slice(0, MAX_LEXICAL_FOR_LLM);
+          const trimmedVector = vectorDocs.slice(0, MAX_VECTOR_FOR_LLM);
+
+          // lexical first, then semantic
+          return [...trimmedLexical, ...trimmedVector];
+        });
+
         // Create history-aware retriever
         const historyAwareRetriever = await createHistoryAwareRetriever({
           llm: this.llm,
-          retriever: this.vectorStore.asRetriever({
-            k: 100,
-            searchType: 'mmr',
-            searchKwargs: {
-              fetchK: 200,
-              lambda: 0.5,
-            },
-            filter,
-          }),
+          retriever: combinedRetriever,
           rephrasePrompt: historyAwarePrompt,
         });
 
@@ -476,21 +609,20 @@ Last Online: ${metadata.last_online_at}
 
 Use the provided context to answer questions about:
 - Events: name, location, start and end dates, guest counts, founder counts.
-- Guests: names, roles, their respective bios which events they are attending
+- Guests: roles, their respective bios which events they are attending
 - Founders: who they are, which events they attend
 - Education or workplaces: search the bio of each guest/attendee for company or college. If not mentioned, return "Unknown"
 - Socials: extract Instagram(Instagram:), Twitter, YouTube, TikTok handles exactly as in context. If none, return "Unknown"
 - If asked which events are allumini (guest name) of this college( college can be IIT, MIT, Havard etc please use keyword they provided) use the "college_univerity_allumi_of:" in the guest list to find the answer. if the keyword is not found there search in the "Bio:" of the guest list.
--If the user asks can you tell me which events this guest (they will give a name eg Prateek) from this organisation ( can use term like works, founder , from) is going. Use the name of the guest and Company_or_organisation_they_work_for
  to find this particular person and then list out the event in which they appear in guest list. If only one of them is given, then say "Please provide more information".
  - To answer question related to number of guest coming for the event use the total guest metadata in the REGISTRATION & ATTENDANCE.
  -To answer question related to number of founder coming for the event use the Total Founders metadata in the REGISTRATION & ATTENDANCE.
-
+- When returning info about guests do not send guest_id just send info about guests based on their bio
 When checking for educational institutions or workplaces:
 - Look for variations or abbreviations (e.g., "IIT", "Indian Institute of Technology", "IITD", "IIT Delhi", "Harvard", "Harvard University").
 - Use context clues from the guest bio to detect likely institutions, but do not assume.
 - If you find no clear match, respond with "I don't have enough information for that."
- 
+- When asked about a particular guests name, say "We cannot share personal details about individuals."
 
 Rules:
 1. Answer only from the provided context. Do NOT make assumptions or guesses.
@@ -505,10 +637,6 @@ Rules:
 Example:
 - Question: Who works at StationX.network?
 - Answer: Rish works at StationX.network
-- Question: What is the Instagram handle of Aeron B?
-- Answer: arankk
--Question: Prateek from blocmates is going to which events?
--Answer: He is going to **Build Buddies Hanoi**, **LabWeek Web3 Opening Party:** .
 -Question: Which events have allumini from IIT mumbai?
 
 

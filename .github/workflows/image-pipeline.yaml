@@ -28,7 +28,7 @@ jobs:
         id: fetch-secrets
         env:
           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-          SECRET_ID: 'twittel-lol-be-secrets'
+          SECRET_ID: 'stnx-ui-service-secrets'
         run: |
           SECRETS=$(aws secretsmanager get-secret-value --secret-id $SECRET_ID --region $AWS_DEFAULT_REGION --query SecretString --output text)
           echo "$SECRETS" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' > .env
@@ -41,7 +41,7 @@ jobs:
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: twitter-kol-camp-be
+          ECR_REPOSITORY: stnx-ui-service
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build --build-arg ENV_FILE=.env -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
@@ -52,14 +52,14 @@ jobs:
         id: deploy-apprunner
         uses: awslabs/amazon-app-runner-deploy@main
         with:
-          service: twitter-kol-camp-be
+          service: stnx-ui-service
           image: ${{ steps.build-image.outputs.image }}
           access-role-arn: ${{ secrets.ROLE_ARN }}
           runtime: NODEJS_18
           region: ${{ secrets.AWS_REGION }}
           cpu: 1
           memory: 2
-          port: 8000
+          port: 3000
           wait-for-service-stability: true
 
       - name: App Runner output
