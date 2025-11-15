@@ -3,7 +3,7 @@ import { Module } from '@nestjs/common';
 // import { MongooseConfigService } from './database/mongoose-config.service';
 // import { MongooseModule } from '@nestjs/mongoose';
 import { ConfigModule } from '@nestjs/config';
-import databaseConfig from './database/config/database.config';
+// import databaseConfig from './database/config/database.config';
 // import { EventsModule } from './events/events.module';
 import { RagModule } from './rag/rag.module';
 import appConfig from './config/app.config';
@@ -16,7 +16,7 @@ import appConfig from './config/app.config';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [databaseConfig, appConfig],
+      load: [appConfig],
       envFilePath: ['.env'],
     }),
     RagModule,
