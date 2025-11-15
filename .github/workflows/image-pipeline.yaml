@@ -28,7 +28,7 @@ jobs:
         id: fetch-secrets
         env:
           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-          SECRET_ID: 'stnx-ui-service-secrets'
+          SECRET_ID: 'luma-chatbot-secrets'
         run: |
           SECRETS=$(aws secretsmanager get-secret-value --secret-id $SECRET_ID --region $AWS_DEFAULT_REGION --query SecretString --output text)
           echo "$SECRETS" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' > .env
@@ -41,7 +41,7 @@ jobs:
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: stnx-ui-service
+          ECR_REPOSITORY: luma-chatbot
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build --build-arg ENV_FILE=.env -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
@@ -52,7 +52,7 @@ jobs:
         id: deploy-apprunner
         uses: awslabs/amazon-app-runner-deploy@main
         with:
-          service: stnx-ui-service
+          service: luma-chatbot
           image: ${{ steps.build-image.outputs.image }}
           access-role-arn: ${{ secrets.ROLE_ARN }}
           runtime: NODEJS_18
