@@ -4,21 +4,25 @@ FROM node:20.14.0-alpine AS builder
 # Install bash 
 RUN apk add --no-cache bash
 
-# Install global packages 
-RUN npm install -g @nestjs/cli typescript ts-node
+# Install global packages (including pnpm)
+RUN npm install -g pnpm @nestjs/cli typescript ts-node
 
 WORKDIR /usr/src/app
 
-COPY package*.json ./
+# Copy package manifest + lockfile for deterministic pnpm install
+COPY package*.json pnpm-lock.yaml ./
 
-RUN npm install
+# Install dependencies using pnpm
+RUN pnpm install --frozen-lockfile
 
+# Copy the rest of the source code
 COPY . .
 
 # Remove carriage returns from any copied scripts
 RUN find . -type f -name '*.sh' -exec sed -i 's/\r$//' {} +
 
-RUN npm run build
+# Build the app
+RUN pnpm run build
 
 # Stage 2: Create a smaller image for production
 FROM node:20.14.0-alpine
@@ -32,8 +36,9 @@ COPY --from=builder /usr/src/app/package*.json ./
 
 # Accept .env file as a build argument
 ARG ENV_FILE
-COPY $ENV_FILE .env
+COPY ${ENV_FILE} .env
 
 EXPOSE 3000
 
+# Use npm to run the production script (npm is available by default)
 CMD ["npm", "run", "start:prod"]
