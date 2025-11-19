@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import requests
 
@@ -6,10 +5,10 @@ st.set_page_config(
     page_title="Devconnect Chatbot", 
     page_icon="🤖",
     layout="centered",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded"    
 )
 
-# Custom CSS for white theme
+# Custom CSS for light theme + hiding Streamlit elements + bottom banner
 st.markdown("""
     <style>
     .stApp {
@@ -30,7 +29,51 @@ st.markdown("""
         transform: translateY(-2px);
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
+    
+    /* Hide Streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stDeployButton {display: none;}
+    
+    /* Hide GitHub icon, Fork button, and profile picture */
+    .viewerBadge_container__1QSob {display: none;}
+    .styles_viewerBadge__1yB5_ {display: none;}
+    section[data-testid="stToolbar"] {display: none;}
+    button[kind="header"] {display: none;}
+    
+    /* Custom bottom banner */
+    .bottom-banner {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        background-color: #f5f5f5;
+        padding: 12px 20px;
+        text-align: center;
+        font-size: 14px;
+        color: #666;
+        border-top: 1px solid #e0e0e0;
+        z-index: 999;
+    }
+    .bottom-banner a {
+        color: #7c3aed;
+        text-decoration: none;
+        font-weight: 500;
+    }
+    .bottom-banner a:hover {
+        text-decoration: underline;
+    }
+    
+    /* Add padding to main content to prevent overlap with banner */
+    .main .block-container {
+        padding-bottom: 60px;
+    }
     </style>
+    
+    <div class="bottom-banner">
+        By the chads at <a href="https://stationx.network" target="_blank">@stationx.network</a> | <a href="https://t.co/okEHVUcbRW" target="_blank">Deal sharing Chat 📱</a>
+    </div>
 """, unsafe_allow_html=True)
 
 st.title("Luma Chatbot 🤖")
