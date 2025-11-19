@@ -9,6 +9,7 @@ st.set_page_config(
 )
 
 # Custom CSS for light theme + hiding Streamlit elements + bottom banner
+# Custom CSS for light theme + hiding Streamlit elements + bottom banner
 st.markdown("""
     <style>
     .stApp {
@@ -42,6 +43,20 @@ st.markdown("""
     section[data-testid="stToolbar"] {display: none;}
     button[kind="header"] {display: none;}
     
+    /* Hide profile icon and avatar from bottom right */
+    [data-testid="stHeader"] {display: none;}
+    .stActionButton {display: none;}
+    div[data-testid="stStatusWidget"] {display: none;}
+    button[data-testid="baseButton-header"] {display: none;}
+    
+    /* Hide "Hosted with Streamlit" and all footer content */
+    footer {display: none !important;}
+    footer::after {
+        content: none !important;
+        display: none !important;
+    }
+    .reportview-container .main footer {display: none !important;}
+    
     /* Custom bottom banner */
     .bottom-banner {
         position: fixed;
@@ -72,7 +87,11 @@ st.markdown("""
     </style>
     
     <div class="bottom-banner">
-        By the chads at <a href="https://stationx.network" target="_blank">@stationx.network</a> | <a href="https://t.co/okEHVUcbRW" target="_blank">Deal sharing Chat 📱</a>
+        By the chads at <a href="https://stationx.network" target="_blank">@stationx.network</a> | <a href="https://t.co/okEHVUcbRW" target="_blank">Join Deal sharing chat 
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="display: inline-block; vertical-align: middle; margin-left: 4px;">
+            <path d="M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM16.64 8.8C16.49 10.38 15.84 14.22 15.51 15.99C15.37 16.74 15.09 16.99 14.83 17.01C14.25 17.06 13.81 16.62 13.25 16.24C12.37 15.65 11.87 15.27 11.02 14.7C10.03 14.04 10.67 13.66 11.24 13.07C11.39 12.92 14.01 10.53 14.06 10.31C14.07 10.28 14.08 10.19 14.03 10.14C13.98 10.09 13.91 10.11 13.86 10.12C13.79 10.15 12.51 11.03 10.03 12.76C9.67 13 9.34 13.12 9.03 13.11C8.69 13.1 8.05 12.91 7.57 12.75C6.98 12.56 6.51 12.45 6.55 12.12C6.57 11.95 6.82 11.78 7.29 11.6C9.95 10.48 11.72 9.74 12.61 9.37C15.14 8.34 15.67 8.16 16.02 8.15C16.1 8.15 16.28 8.17 16.4 8.27C16.5 8.35 16.53 8.46 16.54 8.54C16.53 8.6 16.55 8.76 16.64 8.8Z" fill="#7c3aed"/>
+        </svg>
+        </a>
     </div>
 """, unsafe_allow_html=True)
 
