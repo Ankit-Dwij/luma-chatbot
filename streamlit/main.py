@@ -95,7 +95,7 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-st.title("Luma Chatbot 🤖")
+st.title("Devconnect Chatbot 🤖")
 st.write("Ask me anything about events and guests!")
 
 # API Configuration
